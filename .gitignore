@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+.vscode/
+
+*.pyc
+
+ecg_live_capture_*.csv
+
+output.txt

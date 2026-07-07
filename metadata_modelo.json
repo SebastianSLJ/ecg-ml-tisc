@@ -1,0 +1,36 @@
+{
+  "fecha_entrenamiento": "2026-07-07T02:46:35.898488",
+  "clases": [
+    "N"
+  ],
+  "num_features": 22,
+  "features": [
+    "media",
+    "std",
+    "rms",
+    "max",
+    "min",
+    "rango",
+    "skewness",
+    "kurtosis",
+    "frecuencia_dominante",
+    "potencia_espectral",
+    "entropia_espectral",
+    "energia_wavelet_nivel_0",
+    "energia_wavelet_nivel_1",
+    "energia_wavelet_nivel_2",
+    "energia_wavelet_nivel_3",
+    "energia_wavelet_nivel_4",
+    "rr_mean",
+    "rr_std",
+    "rr_min",
+    "rr_max",
+    "hrv_rmssd",
+    "pnn50"
+  ],
+  "num_muestras_entrenamiento": 132,
+  "fuente_datos": "CSV LOCAL",
+  "archivo_csv": "ecg_live_capture_20260706_181344.csv",
+  "registros_utilizados": null,
+  "version": "2.0"
+}
