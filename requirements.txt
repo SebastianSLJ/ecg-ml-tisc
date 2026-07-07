@@ -1,0 +1,17 @@
+numpy>=2.0,<3.0
+pandas>=2.2,<3.0
+scipy>=1.13,<2.0
+matplotlib>=3.9,<4.0
+seaborn>=0.13,<1.0
+
+scikit-learn>=1.5,<2.0
+imbalanced-learn>=0.13,<1.0
+
+wfdb>=4.3,<5.0
+PyWavelets>=1.8,<2.0
+
+pyserial>=3.5
+pyqtgraph>=0.13,<0.14
+PyQt5>=5.15,<6.0
+
+joblib>=1.4,<2.0
