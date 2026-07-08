@@ -7,7 +7,6 @@ Sistema de captura, visualización y análisis de señal ECG en tiempo real con 
 ## Requisitos previos
 
 - **Python 3.10 o superior** → https://www.python.org/downloads/
-  - Durante la instalación: marcar ✅ **"Add Python to PATH"**
 - **Git** (opcional, para clonar el repositorio) → https://git-scm.com/downloads
 
 ---
