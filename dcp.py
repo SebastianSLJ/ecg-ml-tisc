@@ -40,6 +40,9 @@ WINDOW_SECONDS = 6
 PEAK_WINDOW_SECONDS = 2.5
 # Periodo refractario tras un pico (evita contar dos veces el mismo QRS)
 REFRACTORY_SECONDS = 0.3
+# Si pasa mas tiempo que esto sin un nuevo pico R (p. ej. leads-off), el BPM
+# mostrado se considera obsoleto y se oculta
+MAX_BPM_AGE_SECONDS = 3.0
 
 
 class CausalECGFilter:
@@ -67,6 +70,16 @@ class CausalECGFilter:
         if self.use_notch:
             out, self.zi_notch = lfilter(self.b_notch, self.a_notch, out, zi=self.zi_notch)
         return out
+    def process_step_by_step(self, chunk):
+        chunk = np.asarray(chunk, dtype=float)        
+        # Etapa 1: Filtro Pasa-banda
+        out_bp, self.zi = sosfilt(self.sos, chunk, zi=self.zi)        
+        # Etapa 2: Filtro Notch 
+        if self.use_notch:
+            out_notch, self.zi_notch = lfilter(self.b_notch, self.a_notch, out_bp, zi=self.zi_notch)
+        else:
+            out_notch = out_bp            
+        return chunk, out_bp, out_notch
 
 
 class LiveCSVRecorder:
@@ -95,18 +108,26 @@ class RPeakDetector:
     - periodo refractario para no contar el mismo latido dos veces
     """
 
-    def __init__(self, fs, k=1.4):
+    def __init__(self, fs, k=1.4, window_seconds=PEAK_WINDOW_SECONDS):
         self.fs = fs
         self.k = k
         self.refractory_samples = int(REFRACTORY_SECONDS * fs)
         self.samples_since_peak = self.refractory_samples
         self.rr_intervals = collections.deque(maxlen=8)
         self.last_peak_time = None
+        # Buffer de historia reciente, independiente del tamano de los chunks
+        # que llegan cada ~40 ms. El umbral adaptativo se calcula sobre esto.
+        self.baseline = collections.deque(maxlen=int(window_seconds * fs))
 
     def update(self, filtered_chunk, t_start):
         """Devuelve lista de (indice_en_chunk, tiempo) de picos detectados."""
+        self.baseline.extend(filtered_chunk)
+        if len(self.baseline) < self.fs:  # aun no hay suficiente historia (< 1 s)
+            return []
+
         peaks_found = []
-        thresh = filtered_chunk.mean() + self.k * filtered_chunk.std()
+        baseline_arr = np.asarray(self.baseline)
+        thresh = baseline_arr.mean() + self.k * baseline_arr.std()
         idx, _ = find_peaks(filtered_chunk, height=thresh, distance=max(1, self.refractory_samples))
         for i in idx:
             t_peak = t_start + i / self.fs
@@ -117,9 +138,12 @@ class RPeakDetector:
                 peaks_found.append((i, t_peak))
         return peaks_found
 
-    @property
-    def bpm(self):
+    def get_bpm(self, t_now):
+        """Si ha pasado demasiado tiempo desde el ultimo pico (p. ej. leads-off),
+        el BPM se considera obsoleto y se reporta None en vez de quedar congelado."""
         if len(self.rr_intervals) < 2:
+            return None
+        if self.last_peak_time is None or (t_now - self.last_peak_time) > MAX_BPM_AGE_SECONDS:
             return None
         rr = np.median(self.rr_intervals)
         if rr <= 0:
@@ -209,14 +233,29 @@ class ECGMonitorWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QHBoxLayout(central)
         self.setCentralWidget(central)
 
-        self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setLabel("bottom", "tiempo", "s")
-        self.plot_widget.setLabel("left", "amplitud (u.a.)")
-        self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
-        self.curve = self.plot_widget.plot(pen=pg.mkPen(color=(0, 255, 90), width=2))
+        self.graphics_layout = pg.GraphicsLayoutWidget()
+        layout.addWidget(self.graphics_layout, stretch=4)
+
+        # Gráfica 1: Raw
+        self.plot_raw = self.graphics_layout.addPlot(title="1. Señal Raw (Microcontrolador)")
+        self.curve_raw = self.plot_raw.plot(pen=pg.mkPen('y', width=1.5))
+        self.graphics_layout.nextRow()
+
+        # Gráfica 2: Pasa-Banda
+        self.plot_bp = self.graphics_layout.addPlot(title="2. Filtro Pasa-Banda (0.5 - 40 Hz)")
+        self.curve_bp = self.plot_bp.plot(pen=pg.mkPen('c', width=1.5))
+        self.graphics_layout.nextRow()
+
+        # Gráfica 3: Final (Notch) + Picos R
+        self.plot_final = self.graphics_layout.addPlot(title="3. Filtro Notch (60 Hz) + Picos R")
+        self.curve_final = self.plot_final.plot(pen=pg.mkPen(color=(0, 255, 90), width=2))
+
         self.peak_scatter = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(255, 60, 60), size=10)
-        self.plot_widget.addItem(self.peak_scatter)
-        layout.addWidget(self.plot_widget, stretch=4)
+        self.plot_final.addItem(self.peak_scatter)
+
+        # Sincronizar el eje X para que todas las gráficas se muevan juntas
+        self.plot_bp.setXLink(self.plot_raw)
+        self.plot_final.setXLink(self.plot_raw)
 
         self.bpm_label = QtWidgets.QLabel("-- bpm")
         self.bpm_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -226,6 +265,8 @@ class ECGMonitorWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.bpm_label, stretch=1)
 
         n_window = int(WINDOW_SECONDS * fs)
+        self.buffer_raw = collections.deque([0.0] * n_window, maxlen=n_window)
+        self.buffer_bp = collections.deque([0.0] * n_window, maxlen=n_window)
         self.buffer = collections.deque([0.0] * n_window, maxlen=n_window)
         self.time_buffer = collections.deque(
             [i / fs for i in range(-n_window, 0)], maxlen=n_window
@@ -235,6 +276,7 @@ class ECGMonitorWindow(QtWidgets.QMainWindow):
         self.detector = RPeakDetector(fs)
         self.peak_points = []  # [(t, valor), ...] visibles en la ventana actual
         self.recorder = LiveCSVRecorder(record_path) if record_path else None
+        self.last_valid_raw = None  # ultimo valor CRUDO real (no filtrado)
 
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_plot)
@@ -249,27 +291,33 @@ class ECGMonitorWindow(QtWidgets.QMainWindow):
         if not new_raw:
             return
 
-        # tratar electrodo desconectado como mantener el ultimo valor (evita picos falsos)
+        # tratar electrodo desconectado como mantener el ultimo valor CRUDO
+        # real (no el filtrado, que ronda cerca de cero y causaria un lazo
+        # de realimentacion durante una desconexion prolongada)
         clean_raw = []
-        last_val = self.buffer[-1] if self.buffer else 0.0
+        last_val = self.last_valid_raw if self.last_valid_raw is not None else 0.0
         for v in new_raw:
             if v is None:
                 clean_raw.append(last_val)
             else:
                 clean_raw.append(float(v))
                 last_val = float(v)
+        self.last_valid_raw = last_val
 
         t_start = self.sample_index / self.fs
-        filtered = self.filter.process(clean_raw)
+        raw_chunk, bp_chunk, filtered = self.filter.process_step_by_step(clean_raw)
+        t_end = t_start + len(clean_raw) / self.fs
 
         peaks = self.detector.update(filtered, t_start)
         for i, t_peak in peaks:
             self.peak_points.append((t_peak, filtered[i]))
 
-        bpm = self.detector.bpm
+        bpm = self.detector.get_bpm(t_end)
         rows_to_write = []
 
         for i, val in enumerate(filtered):
+            self.buffer_raw.append(raw_chunk[i])
+            self.buffer_bp.append(bp_chunk[i])
             self.buffer.append(val)
             t_sample = t_start + i / self.fs
             self.time_buffer.append(t_sample)
@@ -292,14 +340,17 @@ class ECGMonitorWindow(QtWidgets.QMainWindow):
         t_now = self.time_buffer[-1]
         self.peak_points = [(t, v) for (t, v) in self.peak_points if t_now - t <= WINDOW_SECONDS]
 
-        self.curve.setData(list(self.time_buffer), list(self.buffer))
+        t_list = list(self.time_buffer)
+        self.curve_raw.setData(t_list, list(self.buffer_raw))
+        self.curve_bp.setData(t_list, list(self.buffer_bp))
+        self.curve_final.setData(t_list, list(self.buffer))
         if self.peak_points:
             xs, ys = zip(*self.peak_points)
             self.peak_scatter.setData(list(xs), list(ys))
         else:
             self.peak_scatter.setData([], [])
 
-        self.plot_widget.setXRange(t_now - WINDOW_SECONDS, t_now, padding=0)
+        self.plot_raw.setXRange(t_now - WINDOW_SECONDS, t_now, padding=0)
 
         if bpm is not None:
             self.bpm_label.setText(f"{bpm:.0f}\nbpm")
