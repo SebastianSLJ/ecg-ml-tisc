@@ -26,6 +26,7 @@ from collections import Counter
 from datetime import datetime
 import warnings
 from pathlib import Path
+import argparse
 from imblearn.over_sampling import SMOTE
 warnings.filterwarnings('ignore')
 
@@ -478,6 +479,21 @@ def entrenar_modelo_clasificacion(latidos, etiquetas):
 """# Ejecución principal"""
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Entrenamiento de clasificador ECG")
+    parser.add_argument(
+        "--csv",
+        default=None,
+        help="Ruta al CSV ECG local (si se omite, usa el valor por defecto del script)",
+    )
+    args = parser.parse_args()
+
+    if args.csv:
+        CSV_FILE = args.csv
+        USE_CSV = Path(CSV_FILE).exists()
+        if not USE_CSV:
+            print(f"Error: no se encontró el archivo CSV: {CSV_FILE}")
+            raise SystemExit(1)
+
     # Lista ampliada de registros para mejor entrenamiento
     if not USE_CSV:
         registros_entrenamiento = [100, 101, 103, 105, 106, 108, 109,

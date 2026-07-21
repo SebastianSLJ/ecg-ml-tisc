@@ -1,5 +1,5 @@
 {
-  "fecha_entrenamiento": "2026-07-07T02:46:35.898488",
+  "fecha_entrenamiento": "2026-07-15T23:12:42.907325",
   "clases": [
     "N"
   ],
@@ -28,9 +28,9 @@
     "hrv_rmssd",
     "pnn50"
   ],
-  "num_muestras_entrenamiento": 132,
+  "num_muestras_entrenamiento": 101,
   "fuente_datos": "CSV LOCAL",
-  "archivo_csv": "ecg_live_capture_20260706_181344.csv",
+  "archivo_csv": "ecg_live_capture1111.csv",
   "registros_utilizados": null,
   "version": "2.0"
 }

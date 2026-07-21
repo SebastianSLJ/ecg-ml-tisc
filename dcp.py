@@ -4,9 +4,6 @@ aplicando un filtrado causal (apto para streaming) para que la traza se
 vea limpia, similar a la de un electrocardiografo real, y calcula la
 frecuencia cardiaca latido a latido detectando picos R.
 
-Requiere:
-    pip install pyserial pyqtgraph pyqt5 numpy scipy --break-system-packages
-
 Uso:
     # Con el Arduino conectado, tal como en tu script de captura:
     python3 ecg_realtime_view.py --port /dev/ttyUSB0
@@ -108,7 +105,7 @@ class RPeakDetector:
     - periodo refractario para no contar el mismo latido dos veces
     """
 
-    def __init__(self, fs, k=1.4, window_seconds=PEAK_WINDOW_SECONDS):
+    def __init__(self, fs, k=3.0, window_seconds=PEAK_WINDOW_SECONDS):
         self.fs = fs
         self.k = k
         self.refractory_samples = int(REFRACTORY_SECONDS * fs)
@@ -116,26 +113,34 @@ class RPeakDetector:
         self.rr_intervals = collections.deque(maxlen=8)
         self.last_peak_time = None
         # Buffer de historia reciente, independiente del tamano de los chunks
-        # que llegan cada ~40 ms. El umbral adaptativo se calcula sobre esto.
+        # que llegan cada ~40 ms. El umbral adaptativo Y la deteccion de
+        # picos se calculan sobre esto (no sobre cada chunk aislado), para
+        # que cada muestra tenga vecinos a ambos lados al buscar maximos
+        # locales.
         self.baseline = collections.deque(maxlen=int(window_seconds * fs))
+        self.baseline_times = collections.deque(maxlen=int(window_seconds * fs))
 
     def update(self, filtered_chunk, t_start):
-        """Devuelve lista de (indice_en_chunk, tiempo) de picos detectados."""
+        """Devuelve lista de (tiempo, valor) de picos detectados.
+        """
+        chunk_times = [t_start + i / self.fs for i in range(len(filtered_chunk))]
         self.baseline.extend(filtered_chunk)
+        self.baseline_times.extend(chunk_times)
         if len(self.baseline) < self.fs:  # aun no hay suficiente historia (< 1 s)
             return []
 
         peaks_found = []
         baseline_arr = np.asarray(self.baseline)
+        times_arr = np.asarray(self.baseline_times)
         thresh = baseline_arr.mean() + self.k * baseline_arr.std()
-        idx, _ = find_peaks(filtered_chunk, height=thresh, distance=max(1, self.refractory_samples))
+        idx, _ = find_peaks(baseline_arr, height=thresh, distance=max(1, self.refractory_samples))
         for i in idx:
-            t_peak = t_start + i / self.fs
+            t_peak = times_arr[i]
             if self.last_peak_time is None or (t_peak - self.last_peak_time) > REFRACTORY_SECONDS:
                 if self.last_peak_time is not None:
                     self.rr_intervals.append(t_peak - self.last_peak_time)
                 self.last_peak_time = t_peak
-                peaks_found.append((i, t_peak))
+                peaks_found.append((t_peak, baseline_arr[i]))
         return peaks_found
 
     def get_bpm(self, t_now):
@@ -223,46 +228,55 @@ class ECGMonitorWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.fs = fs
         self.sample_queue = sample_queue
-        self.setWindowTitle("Monitor ECG en tiempo real")
-        self.resize(1000, 500)
+        self.setWindowTitle("Monitor ECG - BPM")
+        self.resize(260, 220)
 
         pg.setConfigOption("background", "k")
         pg.setConfigOption("foreground", "w")
 
         central = QtWidgets.QWidget()
-        layout = QtWidgets.QHBoxLayout(central)
+        layout = QtWidgets.QVBoxLayout(central)
         self.setCentralWidget(central)
 
-        self.graphics_layout = pg.GraphicsLayoutWidget()
-        layout.addWidget(self.graphics_layout, stretch=4)
+        # Ventanas separadas para grabar cada etapa del procesamiento por separado.
+        self.raw_window = self._create_plot_window(
+            "ECG 1 - Señal Raw (Microcontrolador)",
+            "1. Señal Raw (Microcontrolador)",
+            pg.mkPen('y', width=1.5),
+            x=40,
+            y=40,
+        )
+        self.bp_window = self._create_plot_window(
+            "ECG 2 - Filtro Pasa-Banda",
+            "2. Filtro Pasa-Banda (0.5 - 40 Hz)",
+            pg.mkPen('c', width=1.5),
+            x=700,
+            y=40,
+        )
+        self.final_window = self._create_plot_window(
+            "ECG 3 - Notch + Picos R",
+            "3. Filtro Notch (60 Hz) + Picos R",
+            pg.mkPen(color=(0, 255, 90), width=2),
+            x=1360,
+            y=40,
+        )
 
-        # Gráfica 1: Raw
-        self.plot_raw = self.graphics_layout.addPlot(title="1. Señal Raw (Microcontrolador)")
-        self.curve_raw = self.plot_raw.plot(pen=pg.mkPen('y', width=1.5))
-        self.graphics_layout.nextRow()
-
-        # Gráfica 2: Pasa-Banda
-        self.plot_bp = self.graphics_layout.addPlot(title="2. Filtro Pasa-Banda (0.5 - 40 Hz)")
-        self.curve_bp = self.plot_bp.plot(pen=pg.mkPen('c', width=1.5))
-        self.graphics_layout.nextRow()
-
-        # Gráfica 3: Final (Notch) + Picos R
-        self.plot_final = self.graphics_layout.addPlot(title="3. Filtro Notch (60 Hz) + Picos R")
-        self.curve_final = self.plot_final.plot(pen=pg.mkPen(color=(0, 255, 90), width=2))
+        self.plot_raw = self.raw_window["plot"]
+        self.curve_raw = self.raw_window["curve"]
+        self.plot_bp = self.bp_window["plot"]
+        self.curve_bp = self.bp_window["curve"]
+        self.plot_final = self.final_window["plot"]
+        self.curve_final = self.final_window["curve"]
 
         self.peak_scatter = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(255, 60, 60), size=10)
         self.plot_final.addItem(self.peak_scatter)
-
-        # Sincronizar el eje X para que todas las gráficas se muevan juntas
-        self.plot_bp.setXLink(self.plot_raw)
-        self.plot_final.setXLink(self.plot_raw)
 
         self.bpm_label = QtWidgets.QLabel("-- bpm")
         self.bpm_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.bpm_label.setStyleSheet(
             "color: #2ecc71; background-color: black; font-size: 64px; font-weight: bold;"
         )
-        layout.addWidget(self.bpm_label, stretch=1)
+        layout.addWidget(self.bpm_label)
 
         n_window = int(WINDOW_SECONDS * fs)
         self.buffer_raw = collections.deque([0.0] * n_window, maxlen=n_window)
@@ -281,6 +295,20 @@ class ECGMonitorWindow(QtWidgets.QMainWindow):
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_plot)
         self.timer.start(40)  # ~25 fps, suficiente para que se vea fluido
+
+    def _create_plot_window(self, window_title, plot_title, pen, x, y):
+        widget = pg.PlotWidget(title=plot_title)
+        widget.setWindowTitle(window_title)
+        widget.resize(620, 300)
+        widget.move(x, y)
+        widget.show()
+
+        plot = widget.getPlotItem()
+        plot.showGrid(x=True, y=True, alpha=0.25)
+        plot.setLabel("bottom", "Tiempo", units="s")
+        plot.setLabel("left", "Amplitud")
+        curve = plot.plot(pen=pen)
+        return {"widget": widget, "plot": plot, "curve": curve}
 
     def update_plot(self):
         # sacar todo lo que haya llegado desde el ultimo refresco
@@ -309,8 +337,8 @@ class ECGMonitorWindow(QtWidgets.QMainWindow):
         t_end = t_start + len(clean_raw) / self.fs
 
         peaks = self.detector.update(filtered, t_start)
-        for i, t_peak in peaks:
-            self.peak_points.append((t_peak, filtered[i]))
+        for t_peak, val in peaks:
+            self.peak_points.append((t_peak, val))
 
         bpm = self.detector.get_bpm(t_end)
         rows_to_write = []
@@ -351,6 +379,8 @@ class ECGMonitorWindow(QtWidgets.QMainWindow):
             self.peak_scatter.setData([], [])
 
         self.plot_raw.setXRange(t_now - WINDOW_SECONDS, t_now, padding=0)
+        self.plot_bp.setXRange(t_now - WINDOW_SECONDS, t_now, padding=0)
+        self.plot_final.setXRange(t_now - WINDOW_SECONDS, t_now, padding=0)
 
         if bpm is not None:
             self.bpm_label.setText(f"{bpm:.0f}\nbpm")
@@ -360,6 +390,8 @@ class ECGMonitorWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event):
         if self.recorder is not None:
             self.recorder.close()
+        for win in (self.raw_window, self.bp_window, self.final_window):
+            win["widget"].close()
         super().closeEvent(event)
 
 
